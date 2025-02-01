@@ -1,34 +1,47 @@
-// Energy Prices Widget with 2-Hour Caching
-// Fetches 14 hours of electricity prices from frankenergie but only shows future prices.
-
+// Energy Prices Widget with 2-Hour Caching (Using EnergyZero API)
 const SETTINGS = {
     GRAPH: { WIDTH: 500, HEIGHT: 200 },
-    CACHE: { DURATION: 2 * 60 * 60 * 1000, FILE: "energy_prices_cache.json" }
+    CACHE: { DURATION: 2 * 60 * 60 * 1000, FILE: "energy_prices_cache2.json" } // 2-hour caching
 };
 
-// API Call
+// Fetch electricity prices from EnergyZero API
 async function fetchElectricityPrices() {
-    const today = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const fromTime = now.toISOString().slice(0, 14) + "00:00Z";
+    const tillTime = new Date(now.getTime() + 14 * 60 * 60 * 1000).toISOString().slice(0, 14) + "00:00Z";
 
-    const request = new Request("https://www.frankenergie.nl/graphql");
+    console.log(`Fetching electricity prices from: ${fromTime} to ${tillTime}`);
+
+    const request = new Request("https://api.energyzero.nl/v1/gql");
     request.method = "POST";
     request.headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0",
-        "Accept": "*/*", "Accept-Language": "en-US,en;q=0.5",
-        "content-type": "application/json", "x-country": "NL",
-        "x-graphql-client-name": "frank-www", "x-graphql-client-version": "5.60.0",
-        "Sec-GPC": "1", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin"
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "vendors": "5e94edf4-a182-4c7b-99c7-0bfb08c587c5",
+        "content-type": "application/json",
     };
     request.body = JSON.stringify({
-        query: `query MarketPrices($date: String!) {
-              marketPrices(date: $date) { electricityPrices { from till allInPrice } } }`,
-        variables: { date: today }, operationName: "MarketPrices"
+        query: `query EnergyMarketPrices($input: EnergyMarketPricesInput!) {
+              energyMarketPrices(input: $input) {
+                prices {
+                  from
+                  till
+                  energyPriceIncl
+                }
+              }
+            }`,
+        variables: { input: { from: fromTime, till: tillTime, intervalType: "Hourly", type: "Electricity" } },
+        operationName: "EnergyMarketPrices"
     });
 
-    return await request.loadJSON();
+    try {
+        return await request.loadJSON();
+    } catch (error) {
+        console.error("Error fetching electricity prices: "+ error);
+        return null;
+    }
 }
 
-// Caching Logic
+// Get cached prices or fetch new ones
 async function getCachedElectricityPrices() {
     const fm = FileManager.local();
     const cachePath = fm.joinPath(fm.cacheDirectory(), SETTINGS.CACHE.FILE);
@@ -43,11 +56,11 @@ async function getCachedElectricityPrices() {
 
     console.log("Fetching new electricity prices...");
     const data = await fetchElectricityPrices();
-    fm.writeString(cachePath, JSON.stringify(data));
+    if (data) fm.writeString(cachePath, JSON.stringify(data));
     return data;
 }
 
-// Process Data
+// Filter and sort only future prices
 function filterFuturePrices(prices) {
     const now = new Date();
     const endTime = new Date(now.getTime() + 12 * 60 * 60 * 1000);
@@ -55,7 +68,7 @@ function filterFuturePrices(prices) {
         .sort((a, b) => new Date(a.from) - new Date(b.from));
 }
 
-// Find Cheapest 4-Hour Window
+// Find the cheapest 4-hour window
 function findCheapestWindow(data, windowSize = 4) {
     return data.reduce((best, _, i, arr) => {
         if (i > arr.length - windowSize) return best;
@@ -64,7 +77,7 @@ function findCheapestWindow(data, windowSize = 4) {
     }, { sum: Infinity, start: 0 });
 }
 
-// Generate Graph
+// Generate the bar chart image
 function drawBarChart(dataPoints, cheapestWindow) {
     const { WIDTH, HEIGHT } = SETTINGS.GRAPH;
     const margin = 10, chartW = WIDTH - 2 * margin, chartH = HEIGHT - 2 * margin;
@@ -86,31 +99,35 @@ function drawBarChart(dataPoints, cheapestWindow) {
         const barHeight = ((val - baseline) / range) * chartH;
         const y = margin + chartH - barHeight;
 
-        if (i >= cheapestWindow.start && i < cheapestWindow.start + 4) {
-            draw.setFillColor(new Color("#ffffff"));
-            draw.fillRect(new Rect(x, y, barWidth, barHeight));
-        } else {
-            draw.setStrokeColor(new Color("#ffffff"));
-            draw.strokeRect(new Rect(x, y, barWidth, barHeight));
-        }
+        draw.setFillColor(i >= cheapestWindow.start && i < cheapestWindow.start + 4 ? new Color("#ffffff") : new Color("#ffffff"));
+        draw.fillRect(new Rect(x, y, barWidth, barHeight));
     });
 
     return draw.getImage();
 }
 
-// Create Widget
+// Create widget UI
 async function createWidget() {
     const widget = new ListWidget();
     widget.backgroundColor = new Color("#222222");
 
     const data = await getCachedElectricityPrices();
-    const prices = data?.data?.marketPrices?.electricityPrices;
-    if (!prices || prices.length === 0) return widget.addText("No data");
+    if (!data || !data.data || !data.data.energyMarketPrices?.prices) {
+        console.error("No valid price data received.");
+        widget.addText("⚠️ No data available");
+        return widget;
+    }
+
+    const prices = data.data.energyMarketPrices.prices;
+    console.log(`Received ${prices.length} price entries.`);
 
     const filteredPrices = filterFuturePrices(prices);
-    if (filteredPrices.length < 2) return widget.addText("Not enough data");
+    if (filteredPrices.length < 2) {
+        widget.addText("⚠️ Not enough data");
+        return widget;
+    }
 
-    const dataPoints = filteredPrices.map(p => p.allInPrice);
+    const dataPoints = filteredPrices.map(p => p.energyPriceIncl);
     const cheapestWindow = findCheapestWindow(dataPoints);
 
     // Calculate cheapest time offset
@@ -126,6 +143,8 @@ async function createWidget() {
     const minPrice = Math.min(...dataPoints).toFixed(2);
     const maxPrice = Math.max(...dataPoints).toFixed(2);
     const titleText = `${minPrice} - ${maxPrice}${cheapestStartOffset}`;
+
+    console.log(`Graph Data: Min ${minPrice}, Max ${maxPrice}, Cheapest Window: ${cheapestStartOffset}`);
 
     widget.addImage(drawBarChart(dataPoints, cheapestWindow)).centerAlignImage();
     const title = widget.addText(titleText);
