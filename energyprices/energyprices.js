@@ -1,11 +1,11 @@
-// Frank Energie Electricity Prices Widget (Bar Chart with Min/Max Labels)
-// This Scriptable widget fetches electricity prices from frankenergie,
-// filters for the next 12 hours, draws a bar chart of the "allInPrice" values,
-// and displays the min and max prices on the right side of the chart.
+// Frank Energie Electricity Prices Widget (Bar Chart with Title Showing Min-Max & Cheapest Window Start)
+// This widget fetches electricity prices from frankenergie for the next 12 hours,
+// draws a bar chart (with white, outlined bars) on a dark background,
+// and sets its title to "min - max / @Xh", where X is the number of hours
+// from now when the cheapest 4 consecutive hours start.
 
-const GRAPH_WIDTH = 550;  // increased width to reserve space for text
+const GRAPH_WIDTH = 500;      // overall canvas width
 const GRAPH_HEIGHT = 200;
-const TEXT_AREA_WIDTH = 50;  // reserved area on the right for labels
 
 async function fetchElectricityPrices() {
     let now = new Date();
@@ -61,6 +61,24 @@ function filterPrices(prices, now) {
     return filtered;
 }
 
+function findCheapestWindow(dataPoints, windowSize = 4) {
+    let numBars = dataPoints.length;
+    if(numBars < windowSize) return null;
+    let bestSum = Infinity;
+    let bestIndex = 0;
+    for (let i = 0; i <= numBars - windowSize; i++) {
+        let sum = 0;
+        for (let j = 0; j < windowSize; j++) {
+            sum += dataPoints[i + j];
+        }
+        if (sum < bestSum) {
+            bestSum = sum;
+            bestIndex = i;
+        }
+    }
+    return { start: bestIndex, end: bestIndex + windowSize - 1 };
+}
+
 function drawBarChart(dataPoints) {
     let draw = new DrawContext();
     draw.size = new Size(GRAPH_WIDTH, GRAPH_HEIGHT);
@@ -70,48 +88,38 @@ function drawBarChart(dataPoints) {
     draw.fillRect(new Rect(0, 0, GRAPH_WIDTH, GRAPH_HEIGHT));
 
     const margin = 10;
-    // Reserve TEXT_AREA_WIDTH on the right; the chart area is:
-    const chartWidth = GRAPH_WIDTH - margin * 2 - TEXT_AREA_WIDTH;
+    const chartWidth = GRAPH_WIDTH - margin * 2;
     const chartHeight = GRAPH_HEIGHT - margin * 2;
 
-    let minPrice = Math.min(...dataPoints);
-    let maxPrice = Math.max(...dataPoints);
-    if (maxPrice === minPrice) { maxPrice += 1; } // avoid division by zero
+    // Determine the baseline: use 0 if all values are above 0; otherwise, the raw minimum.
+    let rawMin = Math.min(...dataPoints);
+    let rawMax = Math.max(...dataPoints);
+    let baseline = rawMin < 0 ? rawMin : 0;
+    if (rawMax === baseline) { rawMax = baseline + 1; }
 
     let numBars = dataPoints.length;
     let allocatedSlot = chartWidth / numBars;
-    // Make each bar 80% of the allocated slot.
     let barWidth = allocatedSlot * 0.8;
 
-    draw.setStrokeColor(new Color("#ffffff"));
-    draw.setLineWidth(2);
+    // Find the cheapest window (4 consecutive hours) using dataPoints.
+    let cheapestWindow = findCheapestWindow(dataPoints, 4);
 
+    draw.setLineWidth(2);
     for (let i = 0; i < numBars; i++) {
-        let normalized = (dataPoints[i] - minPrice) / (maxPrice - minPrice);
+        // Normalize relative to the baseline.
+        let normalized = (dataPoints[i] - baseline) / (rawMax - baseline);
         let barHeight = normalized * chartHeight;
-        // Center the bar in its allocated slot.
         let x = margin + i * allocatedSlot + (allocatedSlot - barWidth) / 2;
-        // y starts from the bottom.
         let y = margin + chartHeight - barHeight;
+
+        // Use white for default; green for bars in the cheapest window.
+        let strokeColor = new Color("#ffffff");
+        if (cheapestWindow && i >= cheapestWindow.start && i <= cheapestWindow.end) {
+            strokeColor = new Color("#00ff00");
+        }
+        draw.setStrokeColor(strokeColor);
         draw.strokeRect(new Rect(x, y, barWidth, barHeight));
     }
-
-    // Draw min and max price labels in the reserved text area on the right.
-    draw.setFont(Font.systemFont(12));
-    draw.setTextColor(new Color("#ffffff"));
-
-    let maxText = maxPrice.toFixed(2);
-    let minText = minPrice.toFixed(2);
-
-    // Define text rectangles in the reserved area.
-    let textX = margin + chartWidth; // starting x for text area
-    let textWidth = TEXT_AREA_WIDTH - 5; // some padding
-
-    let textRectMax = new Rect(textX, margin, textWidth, chartHeight / 2);
-    let textRectMin = new Rect(textX, margin + chartHeight / 2, textWidth, chartHeight / 2);
-
-    draw.drawTextInRect(maxText, textRectMax);
-    draw.drawTextInRect(minText, textRectMin);
 
     return draw.getImage();
 }
@@ -142,11 +150,26 @@ async function createWidget() {
     }
 
     let dataPoints = filteredPrices.map(p => p.allInPrice);
+    // Compute raw min and max for title.
+    let rawMin = Math.min(...dataPoints);
+    let rawMax = Math.max(...dataPoints);
+    // Determine the cheapest window.
+    let cheapestWindow = findCheapestWindow(dataPoints, 4);
+    let cheapestStartOffset = "";
+    if (cheapestWindow) {
+        // Compute hours from now until the start of the cheapest window.
+        let cheapestStartTime = new Date(filteredPrices[cheapestWindow.start].from);
+        let hoursOffset = ((cheapestStartTime - now) / (60 * 60 * 1000));
+        cheapestStartOffset = " @"+ Math.round(hoursOffset) + "h";
+    }
+
+    let titleText = `${rawMin.toFixed(2)} - ${rawMax.toFixed(2)}${cheapestStartOffset}`;
+
     let chartImage = drawBarChart(dataPoints);
     let imgWidget = widget.addImage(chartImage);
     imgWidget.centerAlignImage();
 
-    let title = widget.addText("12h Prices");
+    let title = widget.addText(titleText);
     title.font = Font.systemFont(12);
     title.centerAlignText();
     title.textColor = new Color("#ffffff");
