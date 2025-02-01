@@ -1,10 +1,10 @@
-// Frank Energie Electricity Prices Widget (Bar Chart with Title Showing Min-Max & Cheapest Window Start)
-// This widget fetches electricity prices from frankenergie for the next 12 hours,
-// draws a bar chart (with white, outlined bars) on a dark background,
-// and sets its title to "min - max / @Xh", where X is the number of hours
-// from now when the cheapest 4 consecutive hours start.
+// Frank Energie Electricity Prices Widget (Bar Chart with Title & Cheapest Bars Filled)
+// This widget fetches electricity prices for the next 12 hours from frankenergie,
+// draws a bar chart where bars are outlined in white, except that the cheapest 4-hour window
+// is drawn as solid green bars. The widget title shows the min–max price and the hour offset
+// at which the cheapest window starts.
 
-const GRAPH_WIDTH = 500;      // overall canvas width
+const GRAPH_WIDTH = 500;   // overall canvas width
 const GRAPH_HEIGHT = 200;
 
 async function fetchElectricityPrices() {
@@ -63,7 +63,7 @@ function filterPrices(prices, now) {
 
 function findCheapestWindow(dataPoints, windowSize = 4) {
     let numBars = dataPoints.length;
-    if(numBars < windowSize) return null;
+    if (numBars < windowSize) return null;
     let bestSum = Infinity;
     let bestIndex = 0;
     for (let i = 0; i <= numBars - windowSize; i++) {
@@ -82,16 +82,14 @@ function findCheapestWindow(dataPoints, windowSize = 4) {
 function drawBarChart(dataPoints) {
     let draw = new DrawContext();
     draw.size = new Size(GRAPH_WIDTH, GRAPH_HEIGHT);
+    draw.opaque = false; // transparent background
 
-    // Draw dark background.
-    draw.setFillColor(new Color("#333333"));
-    draw.fillRect(new Rect(0, 0, GRAPH_WIDTH, GRAPH_HEIGHT));
-
+    // Do not fill the canvas; let the widget's background show through.
     const margin = 10;
     const chartWidth = GRAPH_WIDTH - margin * 2;
     const chartHeight = GRAPH_HEIGHT - margin * 2;
 
-    // Determine the baseline: use 0 if all values are above 0; otherwise, the raw minimum.
+    // Determine baseline: if all values are above 0, baseline is 0; otherwise, use raw minimum.
     let rawMin = Math.min(...dataPoints);
     let rawMax = Math.max(...dataPoints);
     let baseline = rawMin < 0 ? rawMin : 0;
@@ -101,7 +99,7 @@ function drawBarChart(dataPoints) {
     let allocatedSlot = chartWidth / numBars;
     let barWidth = allocatedSlot * 0.8;
 
-    // Find the cheapest window (4 consecutive hours) using dataPoints.
+    // Find the cheapest window (4 consecutive hours).
     let cheapestWindow = findCheapestWindow(dataPoints, 4);
 
     draw.setLineWidth(2);
@@ -112,13 +110,15 @@ function drawBarChart(dataPoints) {
         let x = margin + i * allocatedSlot + (allocatedSlot - barWidth) / 2;
         let y = margin + chartHeight - barHeight;
 
-        // Use white for default; green for bars in the cheapest window.
-        let strokeColor = new Color("#ffffff");
+        // For bars in the cheapest window, fill them with green.
         if (cheapestWindow && i >= cheapestWindow.start && i <= cheapestWindow.end) {
-            strokeColor = new Color("#00ff00");
+            draw.setFillColor(new Color("#00ff00"));
+            draw.fillRect(new Rect(x, y, barWidth, barHeight));
+        } else {
+            // For all other bars, just draw an outlined rectangle in white.
+            draw.setStrokeColor(new Color("#ffffff"));
+            draw.strokeRect(new Rect(x, y, barWidth, barHeight));
         }
-        draw.setStrokeColor(strokeColor);
-        draw.strokeRect(new Rect(x, y, barWidth, barHeight));
     }
 
     return draw.getImage();
@@ -150,17 +150,17 @@ async function createWidget() {
     }
 
     let dataPoints = filteredPrices.map(p => p.allInPrice);
-    // Compute raw min and max for title.
+    // Compute raw min and max for the title.
     let rawMin = Math.min(...dataPoints);
     let rawMax = Math.max(...dataPoints);
-    // Determine the cheapest window.
+
+    // Determine cheapest window start offset in hours.
     let cheapestWindow = findCheapestWindow(dataPoints, 4);
     let cheapestStartOffset = "";
     if (cheapestWindow) {
-        // Compute hours from now until the start of the cheapest window.
         let cheapestStartTime = new Date(filteredPrices[cheapestWindow.start].from);
         let hoursOffset = ((cheapestStartTime - now) / (60 * 60 * 1000));
-        cheapestStartOffset = " @"+ Math.round(hoursOffset) + "h";
+        cheapestStartOffset = " @" + Math.round(hoursOffset) + "h";
     }
 
     let titleText = `${rawMin.toFixed(2)} - ${rawMax.toFixed(2)}${cheapestStartOffset}`;
