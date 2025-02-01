@@ -1,16 +1,16 @@
-// Frank Energie Electricity Prices Widget (Electricity Only)
+// Frank Energie Electricity Prices Widget (Bar Chart with Min/Max Labels)
 // This Scriptable widget fetches electricity prices from frankenergie,
-// filters for the next 12 hours, draws a graph of the "allInPrice" values,
-// and sets the widget.
+// filters for the next 12 hours, draws a bar chart of the "allInPrice" values,
+// and displays the min and max prices on the right side of the chart.
 
-const GRAPH_WIDTH = 400;
+const GRAPH_WIDTH = 550;  // increased width to reserve space for text
 const GRAPH_HEIGHT = 200;
+const TEXT_AREA_WIDTH = 50;  // reserved area on the right for labels
 
 async function fetchElectricityPrices() {
     let now = new Date();
     let currentDateStr = now.toISOString().slice(0, 10);
 
-    // Build the GraphQL request payload.
     let reqBody = {
         query: `
       query MarketPrices($date: String!) {
@@ -47,13 +47,11 @@ async function fetchElectricityPrices() {
     };
     req.body = JSON.stringify(reqBody);
 
-    // Await the network response.
     let json = await req.loadJSON();
     return json;
 }
 
 function filterPrices(prices, now) {
-    // Filter the electricity prices to include only entries in the next 12 hours.
     let endTime = new Date(now.getTime() + 12 * 60 * 60 * 1000);
     let filtered = prices.filter(p => {
         let priceTime = new Date(p.from);
@@ -63,53 +61,64 @@ function filterPrices(prices, now) {
     return filtered;
 }
 
-function drawGraph(dataPoints) {
+function drawBarChart(dataPoints) {
     let draw = new DrawContext();
     draw.size = new Size(GRAPH_WIDTH, GRAPH_HEIGHT);
 
-    // Draw a white background.
-    draw.setFillColor(new Color("#ffffff"));
+    // Draw dark background.
+    draw.setFillColor(new Color("#333333"));
     draw.fillRect(new Rect(0, 0, GRAPH_WIDTH, GRAPH_HEIGHT));
 
-    const margin = 20;
-    const graphWidth = GRAPH_WIDTH - margin * 2;
-    const graphHeight = GRAPH_HEIGHT - margin * 2;
+    const margin = 10;
+    // Reserve TEXT_AREA_WIDTH on the right; the chart area is:
+    const chartWidth = GRAPH_WIDTH - margin * 2 - TEXT_AREA_WIDTH;
+    const chartHeight = GRAPH_HEIGHT - margin * 2;
 
     let minPrice = Math.min(...dataPoints);
     let maxPrice = Math.max(...dataPoints);
     if (maxPrice === minPrice) { maxPrice += 1; } // avoid division by zero
 
-    let pointSpacing = graphWidth / (dataPoints.length - 1);
-    let points = [];
-    for (let i = 0; i < dataPoints.length; i++) {
+    let numBars = dataPoints.length;
+    let allocatedSlot = chartWidth / numBars;
+    // Make each bar 80% of the allocated slot.
+    let barWidth = allocatedSlot * 0.8;
+
+    draw.setStrokeColor(new Color("#ffffff"));
+    draw.setLineWidth(2);
+
+    for (let i = 0; i < numBars; i++) {
         let normalized = (dataPoints[i] - minPrice) / (maxPrice - minPrice);
-        let x = margin + i * pointSpacing;
-        let y = margin + graphHeight * (1 - normalized); // invert y-axis
-        points.push(new Point(x, y));
+        let barHeight = normalized * chartHeight;
+        // Center the bar in its allocated slot.
+        let x = margin + i * allocatedSlot + (allocatedSlot - barWidth) / 2;
+        // y starts from the bottom.
+        let y = margin + chartHeight - barHeight;
+        draw.strokeRect(new Rect(x, y, barWidth, barHeight));
     }
-    console.log("Graph points: " + JSON.stringify(points));
 
-    // Draw the line graph using a Path.
-    let path = new Path();
-    path.move(points[0]);
-    for (let i = 1; i < points.length; i++) {
-        path.addLine(points[i]);
-    }
-    draw.addPath(path);
-    draw.strokePath(path);
+    // Draw min and max price labels in the reserved text area on the right.
+    draw.setFont(Font.systemFont(12));
+    draw.setTextColor(new Color("#ffffff"));
 
-    // Draw small circles at each data point.
-    draw.setFillColor(new Color("#007aff"));
-    for (let pt of points) {
-        draw.fillEllipse(new Rect(pt.x - 3, pt.y - 3, 6, 6));
-    }
+    let maxText = maxPrice.toFixed(2);
+    let minText = minPrice.toFixed(2);
+
+    // Define text rectangles in the reserved area.
+    let textX = margin + chartWidth; // starting x for text area
+    let textWidth = TEXT_AREA_WIDTH - 5; // some padding
+
+    let textRectMax = new Rect(textX, margin, textWidth, chartHeight / 2);
+    let textRectMin = new Rect(textX, margin + chartHeight / 2, textWidth, chartHeight / 2);
+
+    draw.drawTextInRect(maxText, textRectMax);
+    draw.drawTextInRect(minText, textRectMin);
 
     return draw.getImage();
 }
 
 async function createWidget() {
     let widget = new ListWidget();
-    widget.backgroundColor = new Color("#ffffff");
+    widget.backgroundColor = new Color("#333333");
 
     let now = new Date();
     let json;
@@ -133,18 +142,18 @@ async function createWidget() {
     }
 
     let dataPoints = filteredPrices.map(p => p.allInPrice);
-    let graphImage = drawGraph(dataPoints);
-    let imgWidget = widget.addImage(graphImage);
+    let chartImage = drawBarChart(dataPoints);
+    let imgWidget = widget.addImage(chartImage);
     imgWidget.centerAlignImage();
 
-    let title = widget.addText("Next 12h Electricity Prices");
+    let title = widget.addText("12h Prices");
     title.font = Font.systemFont(12);
     title.centerAlignText();
+    title.textColor = new Color("#ffffff");
 
     return widget;
 }
 
-// Main entry point
 let widget = await createWidget();
 Script.setWidget(widget);
 Script.complete();
