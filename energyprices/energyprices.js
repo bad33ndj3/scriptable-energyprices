@@ -1,11 +1,11 @@
-// Frank Energie Electricity Prices Widget (Bar Chart with Title & Cheapest Bars Filled)
-// This widget fetches electricity prices for the next 12 hours from frankenergie,
-// draws a bar chart where bars are outlined in white, except that the cheapest 4-hour window
-// is drawn as solid green bars. The widget title shows the min–max price and the hour offset
-// at which the cheapest window starts.
+// Energy Prices Widget with 2-Hour Caching & "now" Fix
+// Fetches 14 hours of electricity prices from frankenergie, but only displays future prices.
+// Cached for 2 hours to reduce API requests.
 
-const GRAPH_WIDTH = 500;   // overall canvas width
+const GRAPH_WIDTH = 500;
 const GRAPH_HEIGHT = 200;
+const CACHE_DURATION = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+const CACHE_FILE = "energy_prices_cache.json"; // Cache file name
 
 async function fetchElectricityPrices() {
     let now = new Date();
@@ -42,8 +42,7 @@ async function fetchElectricityPrices() {
         "Sec-GPC": "1",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Referer": "https://www.frankenergie.nl/nl?aff_id=o52puy&gad_source=1&gclid=CjwKCAiAqfe8BhBwEiwAsne6gXoX0Ko-jlu-56JInLh_zOQtP8jTGJ-6vcJF441Sdfg_0KKDW6QY8RoCO_AQAvD_BwE"
+        "Sec-Fetch-Site": "same-origin"
     };
     req.body = JSON.stringify(reqBody);
 
@@ -51,30 +50,39 @@ async function fetchElectricityPrices() {
     return json;
 }
 
+async function getCachedElectricityPrices() {
+    let fm = FileManager.local();
+    let cachePath = fm.joinPath(fm.cacheDirectory(), CACHE_FILE);
+
+    if (fm.fileExists(cachePath)) {
+        let modDate = fm.modificationDate(cachePath);
+        let age = Date.now() - modDate.getTime();
+        if (age < CACHE_DURATION) {
+            console.log("Using cached electricity prices (age: " + (age / 1000 / 60).toFixed(1) + " min)");
+            return JSON.parse(fm.readString(cachePath));
+        }
+    }
+
+    console.log("Fetching new electricity prices...");
+    let json = await fetchElectricityPrices();
+    fm.writeString(cachePath, JSON.stringify(json));
+    return json;
+}
+
 function filterPrices(prices, now) {
-    let endTime = new Date(now.getTime() + 12 * 60 * 60 * 1000);
-    let filtered = prices.filter(p => {
-        let priceTime = new Date(p.from);
-        return priceTime >= now && priceTime <= endTime;
-    });
-    filtered.sort((a, b) => new Date(a.from) - new Date(b.from));
-    return filtered;
+    let startTime = new Date(now); // Show only future prices
+    let endTime = new Date(now.getTime() + 12 * 60 * 60 * 1000); // Display next 12 hours
+
+    return prices
+        .filter(p => new Date(p.from) >= startTime && new Date(p.from) <= endTime)
+        .sort((a, b) => new Date(a.from) - new Date(b.from));
 }
 
 function findCheapestWindow(dataPoints, windowSize = 4) {
-    let numBars = dataPoints.length;
-    if (numBars < windowSize) return null;
-    let bestSum = Infinity;
-    let bestIndex = 0;
-    for (let i = 0; i <= numBars - windowSize; i++) {
-        let sum = 0;
-        for (let j = 0; j < windowSize; j++) {
-            sum += dataPoints[i + j];
-        }
-        if (sum < bestSum) {
-            bestSum = sum;
-            bestIndex = i;
-        }
+    let bestSum = Infinity, bestIndex = 0;
+    for (let i = 0; i <= dataPoints.length - windowSize; i++) {
+        let sum = dataPoints.slice(i, i + windowSize).reduce((a, b) => a + b, 0);
+        if (sum < bestSum) [bestSum, bestIndex] = [sum, i];
     }
     return { start: bestIndex, end: bestIndex + windowSize - 1 };
 }
@@ -82,41 +90,27 @@ function findCheapestWindow(dataPoints, windowSize = 4) {
 function drawBarChart(dataPoints) {
     let draw = new DrawContext();
     draw.size = new Size(GRAPH_WIDTH, GRAPH_HEIGHT);
-    draw.opaque = false; // transparent background
+    draw.opaque = false;
 
-    // Do not fill the canvas; let the widget's background show through.
-    const margin = 10;
-    const chartWidth = GRAPH_WIDTH - margin * 2;
-    const chartHeight = GRAPH_HEIGHT - margin * 2;
-
-    // Determine baseline: if all values are above 0, baseline is 0; otherwise, use raw minimum.
-    let rawMin = Math.min(...dataPoints);
-    let rawMax = Math.max(...dataPoints);
+    const margin = 10, chartWidth = GRAPH_WIDTH - margin * 2, chartHeight = GRAPH_HEIGHT - margin * 2;
+    let rawMin = Math.min(...dataPoints), rawMax = Math.max(...dataPoints);
     let baseline = rawMin < 0 ? rawMin : 0;
-    if (rawMax === baseline) { rawMax = baseline + 1; }
+    rawMax = (rawMax === baseline) ? baseline + 1 : rawMax;
 
-    let numBars = dataPoints.length;
-    let allocatedSlot = chartWidth / numBars;
-    let barWidth = allocatedSlot * 0.8;
-
-    // Find the cheapest window (4 consecutive hours).
+    let numBars = dataPoints.length, allocatedSlot = chartWidth / numBars, barWidth = allocatedSlot * 0.8;
     let cheapestWindow = findCheapestWindow(dataPoints, 4);
 
     draw.setLineWidth(2);
     for (let i = 0; i < numBars; i++) {
-        // Normalize relative to the baseline.
-        let normalized = (dataPoints[i] - baseline) / (rawMax - baseline);
-        let barHeight = normalized * chartHeight;
+        let barHeight = ((dataPoints[i] - baseline) / (rawMax - baseline)) * chartHeight;
         let x = margin + i * allocatedSlot + (allocatedSlot - barWidth) / 2;
         let y = margin + chartHeight - barHeight;
 
-        // For bars in the cheapest window, fill them with green.
         if (cheapestWindow && i >= cheapestWindow.start && i <= cheapestWindow.end) {
-            draw.setFillColor(new Color("#00ff00"));
+            draw.setFillColor(new Color("#ffffff")); // **Reverted to full white for cheapest bars**
             draw.fillRect(new Rect(x, y, barWidth, barHeight));
         } else {
-            // For all other bars, just draw an outlined rectangle in white.
-            draw.setStrokeColor(new Color("#ffffff"));
+            draw.setStrokeColor(new Color("#ffffff")); // **Reverted to white outline**
             draw.strokeRect(new Rect(x, y, barWidth, barHeight));
         }
     }
@@ -126,16 +120,10 @@ function drawBarChart(dataPoints) {
 
 async function createWidget() {
     let widget = new ListWidget();
-    widget.backgroundColor = new Color("#333333");
+    widget.backgroundColor = new Color("#222222");
 
     let now = new Date();
-    let json;
-    try {
-        json = await fetchElectricityPrices();
-    } catch (error) {
-        widget.addText("Error loading data: " + error);
-        return widget;
-    }
+    let json = await getCachedElectricityPrices();
 
     let prices = json.data.marketPrices.electricityPrices;
     if (!prices || prices.length === 0) {
@@ -150,23 +138,19 @@ async function createWidget() {
     }
 
     let dataPoints = filteredPrices.map(p => p.allInPrice);
-    // Compute raw min and max for the title.
-    let rawMin = Math.min(...dataPoints);
-    let rawMax = Math.max(...dataPoints);
+    let rawMin = Math.min(...dataPoints), rawMax = Math.max(...dataPoints);
 
-    // Determine cheapest window start offset in hours.
     let cheapestWindow = findCheapestWindow(dataPoints, 4);
     let cheapestStartOffset = "";
     if (cheapestWindow) {
         let cheapestStartTime = new Date(filteredPrices[cheapestWindow.start].from);
-        let hoursOffset = ((cheapestStartTime - now) / (60 * 60 * 1000));
-        cheapestStartOffset = " @" + Math.round(hoursOffset) + "h";
+        let hoursOffset = Math.round((cheapestStartTime - now) / (60 * 60 * 1000));
+        cheapestStartOffset = (hoursOffset === 0) ? " now" : ` @${hoursOffset}h`; // ✅ **Fix: Replaces "0h" with "now"**
     }
 
     let titleText = `${rawMin.toFixed(2)} - ${rawMax.toFixed(2)}${cheapestStartOffset}`;
 
-    let chartImage = drawBarChart(dataPoints);
-    let imgWidget = widget.addImage(chartImage);
+    let imgWidget = widget.addImage(drawBarChart(dataPoints));
     imgWidget.centerAlignImage();
 
     let title = widget.addText(titleText);
